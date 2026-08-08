@@ -1,0 +1,14 @@
+{
+  "name": "revdiff-loop",
+  "owner": {
+    "name": "Alex",
+    "email": "alex@synapsestudios.com"
+  },
+  "plugins": [
+    {
+      "name": "revdiff-loop",
+      "source": "./",
+      "description": "Review diffs in a floating Zellij revdiff pane, with an automatic annotate-fix-re-review loop"
+    }
+  ]
+}
