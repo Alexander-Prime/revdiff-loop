@@ -2,17 +2,20 @@
 name: revdiff
 description: "Launch revdiff in a floating Zellij pane so the user can annotate the current diff, then address the captured annotations. Use when the user wants to review or annotate a diff."
 arguments: "[optional revdiff args: a ref, two refs, --staged, --only=<file>, ...]"
+allowed-tools:
+  - "Bash(${CLAUDE_SKILL_DIR}/scripts/launch.sh *)"
+  - "Bash(${CLAUDE_PLUGIN_ROOT}/hooks/defer.sh *)"
 ---
 
 # revdiff review
 
 Launch the revdiff TUI for the user, wait for their annotations, then address them.
 
-The launcher script is `scripts/launch.sh` under this skill's base directory (stated as "Base directory for this skill" at the top of this invocation). Resolve it to an absolute path before running.
+The launcher script is `${CLAUDE_SKILL_DIR}/scripts/launch.sh`. Run it exactly as written — the path is already absolute, and it matches this skill's `allowed-tools` rule verbatim, so rewriting it costs a permission prompt.
 
 ## Workflow
 
-1. Run `<base-dir>/scripts/launch.sh $ARGUMENTS` **in the background** (`run_in_background: true`). Then **stop and return control to the user** — they are reviewing in the floating pane and may take a while. Do NOT call `TaskOutput` to wait on the result; a `<task-notification>` arrives when they close revdiff. With no arguments, revdiff auto-detects what to review (working-copy changes, last commit, or branch vs main; git, jj, and hg all supported).
+1. Run `${CLAUDE_SKILL_DIR}/scripts/launch.sh $ARGUMENTS` **in the background** (`run_in_background: true`). Then **stop and return control to the user** — they are reviewing in the floating pane and may take a while. Do NOT call `TaskOutput` to wait on the result; a `<task-notification>` arrives when they close revdiff. With no arguments, revdiff auto-detects what to review (working-copy changes, last commit, or branch vs main; git, jj, and hg all supported).
 2. When the notification arrives, read the task output:
    - **Nonzero exit** — launch or revdiff failure; report the error and stop.
    - **Empty stdout** — the user finished without leaving annotations; say so and stop.

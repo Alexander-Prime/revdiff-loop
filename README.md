@@ -36,6 +36,35 @@ Arguments are passed through to revdiff unmodified.
 
 ## Configuration
 
+### Permission prompts
+
+The skill's `allowed-tools` frontmatter pre-approves the two bundled scripts Claude runs
+(`scripts/launch.sh` and `hooks/defer.sh`), so typing `/revdiff` opens the pane without a
+prompt. That grant only covers the turn you invoke the skill in — it clears as soon as you
+send your next message. The loop is built to span your messages, so hook-triggered
+follow-up passes will still prompt.
+
+For a prompt-free loop, add session-wide allow rules to `~/.claude/settings.json`. Bash
+rules match the literal command string, so these need your real absolute home path —
+`~/` is not expanded here. The wildcard covers the version directory so the rules survive
+plugin updates:
+
+```json
+{
+  "permissions": {
+    "allow": [
+      "Bash(/home/you/.claude/plugins/cache/revdiff-loop/revdiff-loop/*/skills/revdiff/scripts/launch.sh *)",
+      "Bash(/home/you/.claude/plugins/cache/revdiff-loop/revdiff-loop/*/hooks/defer.sh *)"
+    ]
+  }
+}
+```
+
+Both scripts are inert without a review in flight: `launch.sh` only opens a pane and
+prints what you typed into it, and `defer.sh` only touches two flag files in `/tmp`.
+
+### Other
+
 - `REVDIFF_POPUP_WIDTH` / `REVDIFF_POPUP_HEIGHT` — floating pane size (default `90%`)
 - revdiff's own look and behavior (theme, line numbers, keybindings) belong in
   `~/.config/revdiff/config`, which applies to manual runs too
