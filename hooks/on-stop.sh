@@ -48,8 +48,11 @@ if [ -f "${LOOP_FLAG}.baseline" ]; then
     fi
 fi
 
+# The reason is deliberately terse: the full launch/defer/end procedure lives in
+# the skill's step 4, which stays in context for the whole session, and restating
+# it on every trigger floods the conversation.
 if [ -n "$HISTORY_CHANGED" ]; then
-    printf '{"decision": "block", "reason": "Files were changed in response to revdiff annotations, but the commit history has changed since the last review pass, so the review baseline was discarded and the next pass covers the full diff as a fresh session. If discussion topics from those annotations are still unresolved in the conversation, do not launch: run %s to keep the re-review pending, tell the user the re-review is deferred until the discussion settles, and stop. If the conversation has moved on to unrelated work without resolving them, tell the user the re-review is available via /revdiff, and stop. Otherwise launch another review pass: run %s in the background (run_in_background: true), appending --description=<text> where <text> is a brief summary of the changes you made in response to the annotations (it is shown in the pane info popup). Tell the user that a history change was detected and the pane shows the full diff as a fresh session, and stop. The annotations arrive later as a task notification."}\n' "$DEFER_SCRIPT" "$LAUNCH_SCRIPT"
+    printf '{"decision": "block", "reason": "revdiff loop: files changed since the last pass; history changed, so the baseline was dropped and the next pass is a fresh full-diff session. Apply skill step 4. Launch: %s | Defer: %s"}\n' "$LAUNCH_SCRIPT" "$DEFER_SCRIPT"
 else
-    printf '{"decision": "block", "reason": "Files were changed in response to revdiff annotations. If discussion topics from those annotations are still unresolved in the conversation, do not launch: run %s to keep the re-review pending, tell the user the re-review is deferred until the discussion settles, and stop. If the conversation has moved on to unrelated work without resolving them, tell the user the re-review is available via /revdiff, and stop. Otherwise launch another review pass: run %s%s in the background (run_in_background: true), appending --description=<text> where <text> is a brief summary of the changes you made in response to the annotations (it is shown in the pane info popup). Tell the user the pane is open, and stop. The annotations arrive later as a task notification."}\n' "$DEFER_SCRIPT" "$LAUNCH_SCRIPT" "${BASELINE:+ $BASELINE}"
+    printf '{"decision": "block", "reason": "revdiff loop: files changed since the last pass. Apply skill step 4. Launch: %s%s | Defer: %s"}\n' "$LAUNCH_SCRIPT" "${BASELINE:+ $BASELINE}" "$DEFER_SCRIPT"
 fi
