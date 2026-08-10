@@ -1,6 +1,6 @@
 {
-  "name": "revdiff-loop",
-  "description": "Review diffs in a floating Zellij revdiff pane, with an automatic annotate-fix-re-review loop",
+  "name": "revdiff-relay",
+  "description": "Annotate diffs in a floating Zellij revdiff pane; each flush is relayed into your Claude Code session",
   "author": {
     "name": "Alex",
     "email": "alex@synapsestudios.com"

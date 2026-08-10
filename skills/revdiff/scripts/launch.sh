@@ -1,7 +1,13 @@
 #!/usr/bin/env bash
-# Launch revdiff in a floating Zellij pane and print captured annotations to stdout.
+# Open revdiff in a floating Zellij pane, wired to inject each annotation flush
+# back into this Claude Code session, and return immediately.
+#
 # usage: launch.sh [revdiff args...]
-# exit: 0 with annotations on stdout (empty if reviewer left none), nonzero on failure
+# exit: 0 once the pane is open, nonzero if it could not be opened
+#
+# Nothing watches the pane after this. revdiff drives the whole review: the
+# reviewer annotates, flushes with `O`, reloads with `R`, and each flush runs
+# scripts/flush.sh, which posts the annotations to this session's inbox socket.
 set -euo pipefail
 
 if [ -z "${ZELLIJ:-}" ]; then
@@ -15,10 +21,69 @@ if [ -z "$REVDIFF_BIN" ]; then
     exit 1
 fi
 
-OUTPUT_FILE=$(mktemp "${TMPDIR:-/tmp}/revdiff-annotations-XXXXXX")
-trap 'rm -f "$OUTPUT_FILE"' EXIT
+if [ -z "${CLAUDE_CODE_SESSION_ID:-}" ]; then
+    echo "error: not inside a Claude Code session" >&2
+    exit 1
+fi
 
-CMD=("$REVDIFF_BIN" --output="$OUTPUT_FILE" "$@")
+# The socket is how annotations get back here, so its absence is fatal rather
+# than degraded. A session binds one only with cross-session messaging enabled
+# (Claude Code v2.1.224+, macOS/Linux), and binding can fail for reasons not
+# visible from inside the session, so say what to check.
+SOCKET="${CLAUDE_CODE_MESSAGING_SOCKET:-}"
+if [ -z "$SOCKET" ]; then
+    cat >&2 <<'EOF'
+error: this session has no inbox socket, so revdiff has nowhere to send annotations.
+       CLAUDE_CODE_MESSAGING_SOCKET is unset. Check with /status — a session with an
+       inbox shows a "Peer address" row. Requires Claude Code v2.1.224 or later on
+       macOS or Linux. Starting a fresh session usually binds one.
+EOF
+    exit 1
+fi
+SOCKET="${SOCKET#uds:}"
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+FLUSH_SCRIPT="$SCRIPT_DIR/flush.sh"
+
+# Checked here because a flush.sh that can't run is the one failure that leaves
+# no trace: it never starts, so it never writes its log, and revdiff's own error
+# dies with the pane.
+if [ ! -x "$FLUSH_SCRIPT" ]; then
+    printf 'error: %s is missing or not executable\n' "$FLUSH_SCRIPT" >&2
+    exit 1
+fi
+
+STATE_DIR="/tmp/revdiff-${CLAUDE_CODE_SESSION_ID}"
+mkdir -p "$STATE_DIR"
+ANNOTATIONS="$STATE_DIR/annotations"
+
+# revdiff only writes this on flush; clear whatever a previous review left so a
+# stale set can't be injected by the first flush of this one.
+rm -f "$ANNOTATIONS"
+
+# flush.sh needs jq and socat, but it runs in the zellij server's environment,
+# whose PATH is whatever zellij was started with — routinely not the PATH this
+# script sees. Resolve them here, where the environment is known, and pass
+# absolute paths. Failing now is much better than failing at flush time, after
+# the reviewer has already written their annotations.
+JQ_BIN=$(command -v jq || true)
+SOCAT_BIN=$(command -v socat || true)
+MISSING=""
+[ -n "$JQ_BIN" ] || MISSING="jq"
+[ -n "$SOCAT_BIN" ] || MISSING="${MISSING:+$MISSING and }socat"
+if [ -n "$MISSING" ]; then
+    printf 'error: %s not found in PATH; flush.sh needs it to encode and deliver annotations\n' \
+        "$MISSING" >&2
+    exit 1
+fi
+
+# revdiff hands --post-flush-command to a shell, so the arguments are quoted
+# here. Every value is passed explicitly: revdiff is spawned by the zellij
+# server, whose environment has none of the CLAUDE_* variables.
+POST_FLUSH=$(printf '%s --socket-path %q --annotations %q --session-id %q --jq %q --socat %q' \
+    "$FLUSH_SCRIPT" "$SOCKET" "$ANNOTATIONS" "$CLAUDE_CODE_SESSION_ID" "$JQ_BIN" "$SOCAT_BIN")
+
+CMD=("$REVDIFF_BIN" --output="$ANNOTATIONS" --post-flush-command="$POST_FLUSH" "$@")
 
 # the zellij server spawns pane commands with its own environment, which
 # predates shell rc exports; carry the caller's editor through so revdiff's
@@ -30,54 +95,13 @@ if [ ${#ENV_ARGS[@]} -gt 0 ]; then
     CMD=(/usr/bin/env "${ENV_ARGS[@]}" "${CMD[@]}")
 fi
 
-rc=0
-zellij run --floating --close-on-exit --block-until-exit \
+# No --block-until-exit: the pane outlives this script. Bad revdiff arguments
+# therefore surface as a pane that closes immediately rather than as a nonzero
+# exit here.
+zellij run --floating --close-on-exit \
     --width "${REVDIFF_POPUP_WIDTH:-90%}" --height "${REVDIFF_POPUP_HEIGHT:-90%}" \
     --x 5% --y 5% \
     --name "revdiff: $(basename "$PWD")" --cwd "$PWD" \
-    -- "${CMD[@]}" || rc=$?
+    -- "${CMD[@]}"
 
-if [ "$rc" -ne 0 ]; then
-    echo "error: revdiff exited with code $rc (bad arguments, or the pane was killed)" >&2
-    exit "$rc"
-fi
-
-# review-loop contract shared with the plugin's hooks/mark-dirty.sh and
-# hooks/on-stop.sh: the loop flag exists while a pass's annotations await a
-# response; the dirty flag marks file edits made during that window. Keyed by
-# the Claude Code session id, which tool shells and hook processes both
-# inherit; skipped entirely when run outside a Claude session. Hardcoded /tmp
-# because hooks run in Claude Code's process env, whose TMPDIR can differ
-# from this shell's.
-if [ -n "${CLAUDE_CODE_SESSION_ID:-}" ]; then
-    LOOP_FLAG="/tmp/revdiff-loop-${CLAUDE_CODE_SESSION_ID}"
-    rm -f "${LOOP_FLAG}.dirty"
-    if [ -s "$OUTPUT_FILE" ]; then
-        touch "$LOOP_FLAG"
-    else
-        rm -f "$LOOP_FLAG"
-    fi
-
-    # pin the just-reviewed working-copy state so a hook-triggered follow-up
-    # pass can diff from it (revdiff <id> -> jj diff --from <id> --to @),
-    # showing only changes made since this review. jj-only: git has no commit
-    # id for uncommitted work-tree state, so there the follow-up falls back to
-    # the full diff. Every pass pins — a manual pass overwrites the pin,
-    # resetting the review session.
-    #
-    # Line 1 is the baseline commit id. Line 2 is the identity the Stop hook
-    # uses to detect history restructuring before trusting the pin: @'s change
-    # id (differs after jj new/edit, even onto the same parent) plus parent
-    # commit ids (differ after rebase/squash/abandon anywhere in the ancestry,
-    # since commit ids hash their ancestry transitively).
-    BASELINE_FILE="${LOOP_FLAG}.baseline"
-    if jj root >/dev/null 2>&1; then
-        jj log -r @ --no-graph \
-            -T 'commit_id ++ "\n" ++ change_id ++ " " ++ parents.map(|c| c.commit_id()).join(",")' \
-            > "$BASELINE_FILE" 2>/dev/null || rm -f "$BASELINE_FILE"
-    else
-        rm -f "$BASELINE_FILE"
-    fi
-fi
-
-cat "$OUTPUT_FILE"
+echo "revdiff pane open. Annotations will arrive here on each flush (\`O\`)."

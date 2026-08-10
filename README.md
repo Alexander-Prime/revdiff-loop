@@ -1,26 +1,35 @@
-# revdiff-loop
+# revdiff-relay
 
-A Claude Code plugin that wires [revdiff](https://github.com/umputun/revdiff) into an
-annotate → fix → re-review loop, using a floating [Zellij](https://zellij.dev) pane.
+A Claude Code plugin that wires [revdiff](https://github.com/umputun/revdiff) into a
+floating [Zellij](https://zellij.dev) pane and pipes your diff annotations straight into
+your Claude Code session.
 
-`/revdiff` opens the revdiff TUI over the current diff in a floating pane. Annotate the
-diff and close the pane; the annotations flow back to Claude, which answers questions in
-conversation and implements change requests. Whenever Claude modifies files in response
-to annotations, a Stop hook automatically reopens revdiff so you can review the fixes.
-The loop ends when you close a pass without annotations, or when a pass leads to no file
-changes.
+`/revdiff` opens the revdiff TUI over the current diff and gets out of the way. Annotate,
+press `O`, and the annotations appear in your session as a message — Claude answers
+questions in conversation and implements change requests. Press `R` to reload the diff and
+see what changed, annotate again, flush again. There is no round structure and no fixed
+number of passes: the pane is yours for as long as you want it, and each flush is just a
+message.
+
+Nothing on the Claude Code side watches or waits. `/revdiff` stands up a process wired with
+enough context to inject back into your session, and that is the extent of it.
 
 ## Requirements
 
-- `revdiff` on PATH
-- Zellij ≥ 0.44 (`zellij run --block-until-exit`), with Claude Code running inside a
-  Zellij session
+- `revdiff` on PATH, with `--post-flush-command` and the `flush_output` action (`O`)
+- `jq` and `socat` reachable from the shell Claude Code runs in. `launch.sh` resolves them to
+  absolute paths and passes those to `flush.sh`, so they do **not** need to be on the Zellij
+  server's PATH — which is a different environment, and commonly a barer one. A missing tool
+  fails the launch immediately rather than the first flush
+- Zellij with floating pane support, and Claude Code running inside a Zellij session
+- Claude Code **v2.1.224 or later** on macOS or Linux, in a session that binds an inbox
+  socket — check with `/status`, which shows a `Peer address` row when it has one
 
 ## Install
 
 ```
 /plugin marketplace add <git-url-or-owner/repo-or-local-path>
-/plugin install revdiff-loop@revdiff-loop
+/plugin install revdiff-relay@revdiff-relay
 ```
 
 ## Usage
@@ -34,34 +43,30 @@ changes.
 
 Arguments are passed through to revdiff unmodified.
 
+In the pane:
+
+| Key | Effect                                                   |
+| --- | -------------------------------------------------------- |
+| `O` | Flush annotations to Claude without closing the pane     |
+| `R` | Reload the diff from the VCS, picking up Claude's edits  |
+| `i` | Info popup                                               |
+
+`O` and `R` are revdiff's own keys and are rebindable in its config.
+
 ## Configuration
 
-### Permission prompts
+### If you run with permission prompts bypassed
 
-The skill's `allowed-tools` frontmatter pre-approves the two bundled scripts Claude runs
-(`scripts/launch.sh` and `hooks/defer.sh`), so typing `/revdiff` opens the pane without a
-prompt. That grant only covers the turn you invoke the skill in — it clears as soon as you
-send your next message. The loop is built to span your messages, so hook-triggered
-follow-up passes will still prompt.
+An inbox message is delivered without an approval dialog only when Claude Code can verify it
+came from one of the session's own child processes. `flush.sh` is a child of the Zellij
+server, not of Claude Code, so it can't be verified. That is fine in any session that
+prompts for permissions — `auto`, `acceptEdits`, and `dontAsk` all count as prompting, and
+unverified messages are delivered normally. In a session that **bypasses** permission
+prompts, each flush is instead held for your approval, and a held message is dropped
+silently after five minutes.
 
-For a prompt-free loop, add session-wide allow rules to `~/.claude/settings.json`. Bash
-rules match the literal command string, so these need your real absolute home path —
-`~/` is not expanded here. The wildcard covers the version directory so the rules survive
-plugin updates:
-
-```json
-{
-  "permissions": {
-    "allow": [
-      "Bash(/home/you/.claude/plugins/cache/revdiff-loop/revdiff-loop/*/skills/revdiff/scripts/launch.sh *)",
-      "Bash(/home/you/.claude/plugins/cache/revdiff-loop/revdiff-loop/*/hooks/defer.sh *)"
-    ]
-  }
-}
-```
-
-Both scripts are inert without a review in flight: `launch.sh` only opens a pane and
-prints what you typed into it, and `defer.sh` only touches two flag files in `/tmp`.
+If you run that way, set `crossSessionInbound` to `accept` so flushes are delivered
+unattended.
 
 ### Other
 
@@ -69,32 +74,34 @@ prints what you typed into it, and `defer.sh` only touches two flag files in `/t
 - revdiff's own look and behavior (theme, line numbers, keybindings) belong in
   `~/.config/revdiff/config`, which applies to manual runs too
 
-## How the loop works
+## How it works
 
-- `skills/revdiff/scripts/launch.sh` runs revdiff in a floating pane, blocks until the
-  pane closes, and prints the captured annotations. A pass that produces annotations
-  arms a loop flag in `/tmp`, keyed by the Claude Code session ID (inherited by tool
-  shells and hooks alike); a clean pass clears it.
-- `hooks/mark-dirty.sh` (PostToolUse on file-editing tools) marks a dirty flag, but only
-  while the loop flag is armed — ordinary edits outside a review never trigger the loop.
-- `hooks/on-stop.sh` (Stop) consumes both flags: if files changed in response to a pass,
-  it blocks the stop and has Claude launch the next pass.
-- In jj repos, each pass pins the just-reviewed working-copy commit ID (jj snapshots
-  the working copy automatically, so that state stays resolvable). Hook-triggered
-  follow-up passes diff from the pin, so the pane shows only what changed since you
-  last reviewed — unchanged files and unchanged hunks don't reappear. A manual
-  `/revdiff` ignores the pin and reviews the full diff, starting a fresh session. In
-  git repos there is no commit ID for uncommitted work-tree state, so follow-up passes
-  fall back to the full diff.
-- Restructuring history mid-loop (`jj new`, `jj edit`, rebase, squash, abandon) is
-  detected before the pin is trusted: the pin records `@`'s change ID and parent commit
-  IDs, and the Stop hook compares them against the live values. On mismatch the
-  baseline is discarded, the follow-up pass covers the full diff, and Claude explains
-  that a new review session was started.
-- Follow-up passes carry `--description` with Claude's summary of what changed in
-  response to the annotations — press `i` in revdiff to see it in the info popup.
-- When a pass mixes change requests with discussion topics, the requested fixes land
-  immediately, but the re-review is deferred (`hooks/defer.sh` re-arms the loop) until
-  the discussion settles — the pane then opens once, covering everything accumulated
-  since the last close, including changes the discussion produced. If the conversation
-  moves on without resolving, the loop ends and `/revdiff` starts the next session.
+- `skills/revdiff/scripts/launch.sh` opens the floating pane and returns. It points
+  revdiff's `--output` at `/tmp/revdiff-<session-id>/annotations` and passes
+  `--post-flush-command`, with the socket path, annotations path, session id, and the
+  resolved `jq` and `socat` paths baked into the command string.
+- All five are passed explicitly because they have to be. revdiff is spawned by the Zellij
+  server, into an environment with no `CLAUDE_*` variables at all and a PATH that routinely
+  lacks `jq` and `socat`.
+- `skills/revdiff/scripts/flush.sh` runs once per successful flush. It exits silently on an
+  empty annotation set, so clearing your comments costs Claude nothing, then builds a
+  newline-delimited JSON message with `jq --rawfile` and writes it to the session's inbox
+  socket with a one-way `socat`.
+- The message carries `session_id`, so a stale socket path makes the receiver drop the
+  message rather than deliver it into whichever session now owns that pid.
+- The content is prefixed with `Annotations from revdiff:`, so a message arriving mid-task
+  identifies its source.
+- Annotation lifecycle is revdiff's, not the plugin's. `R` drops the annotations on lines the
+  reload changed and keeps the others, so a comment that comes back around is one you left
+  standing on purpose. The plugin does no diffing and keeps no snapshot, which is also why
+  git, jj, and hg all behave identically.
+
+### Debugging
+
+revdiff reports a post-flush-command failure on its own stdout, not in the TUI — and the
+pane runs with `--close-on-exit`, so that output dies with the pane. The socket discards
+malformed writes without complaint too.
+
+So `flush.sh` keeps its own log at `/tmp/revdiff-<session-id>/flush.log`, recording
+every flush, every skip, and every failure with a reason. If flushes seem to vanish, read
+that file first.
